@@ -1,0 +1,27 @@
+# --- 机密：Tushare token 明文，绝不能提交 ---
+info.txt
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.ipynb_checkpoints/
+
+# --- 运行时数据（体积巨大且/或含真实拉取结果，不适合入库）---
+# dim/ fact/ factor/ 由 backfill.py / build_factors.py 从 Tushare 重新生成；
+# backtest/ meta/ raw/ isolation/ logs/ 均为运行产物。
+data/
+
+# --- 前端构建产物与依赖（由 package-lock.json 保证可重现，npm install 重装）---
+frontend/node_modules/
+frontend/dist/
+
+# --- IDE / 工具本地状态（不含项目共享配置，因人而异）---
+.idea/
+.claude/settings.local.json
+
+# --- 操作系统 ---
+.DS_Store
+Thumbs.db

@@ -1,0 +1,341 @@
+# A 股量化系统
+
+小而精的 A 股日频量化系统：**数据层**（采集→校验→存储，Parquet+DuckDB）→ **因子层**
+（13 因子/7 风格，PIT 安全，IC/多空评估）→ **策略层**（可插拔策略注册表，多因子选股为首个实现）
+→ **回测层**（T+1 开盘成交、涨跌停/停牌约束、真实费率）→ **Web 控制台**（Flask+React，回测/因子分析/
+数据运维全部可视化操作）。数据层详细设计见 [A股量化数据层开发文档.md](A股量化数据层开发文档.md)。
+
+```
+quant_data  →  quant_factor  →  quant_strategy  →  quant_backtest
+ (采集/校验/存储)   (因子/股票池)      (策略注册表)        (回测引擎)
+                                              ↘
+                                          quant_web + frontend（可视化控制台，只 import 前四层，零修改）
+```
+
+依赖单向：下游只 import 上游，不反向依赖。四个核心包各自可独立测试、独立使用。
+
+## 目录结构
+
+```
+config.py                 全局配置（token/路径/起始日期/限流/股票池/策略默认参数）
+quant_data/               数据层：采集 → 校验 → 存储
+  client.py               Tushare 封装：限流(滑动窗口)+指数退避重试+分页
+  storage.py              Parquet 落地 + DuckDB 查询（幂等写、参数化查询防注入）
+  calendar.py             交易日历工具
+  synclog.py              同步日志（增量与失败回补依据）
+  pit.py                  财务 Point-in-Time 访问（唯一入口，杜绝未来函数）
+  fetchers/               各数据源采集器（日线/估值/财务/指数/行业/风险利率…）
+  checks/                 校验规则 C1xx~C6xx（结构/完整性/取值/一致性/PIT/异常）
+quant_factor/             因子层：13 因子 + 股票池
+  factors/                因子实现（@register 注册），base.py 存取数辅助
+  universe/               股票池：基础池 + 可插拔池（见下文）
+  neutralize.py           去极值(MAD) + 行业市值中性化(OLS) + 标准化(zscore)
+  evaluate.py             单因子有效性评估（IC/RankIC/ICIR/分组/多空/衰减）
+  compute.py              因子面板计算与落地 + 调仓日频率一致性校验
+  rebalance.py            调仓日历（周频/月频）
+  returns.py              前向收益
+quant_strategy/           策略层：可插拔策略注册表
+  base.py                 Strategy/Combiner 协议 + StrategyContext + 策略注册表
+  strategies/             具体策略实现（当前：multifactor 多因子选股）
+  combine.py              多因子合成器（等权 z-score / 滚动 IC 加权）
+  construct.py            综合得分 → 目标权重（top-N 等权 / 行业中性）
+  constraints.py          权重约束（个股上限等）
+quant_backtest/           回测层：引擎与策略完全解耦，只认目标权重
+  engine.py               主循环：T 信号 → T+1 开盘执行，逐日盯市
+  execution.py            调仓撮合（先卖后买，涨跌停/停牌约束，现金约束）
+  market.py               行情容器（依赖注入：生产读库/测试注入合成行情）
+  costs.py                真实费率模型（佣金/印花税/过户费/滑点，零成本对照）
+  portfolio.py / metrics.py / report.py
+quant_web/                Flask API：只 import 上述四层，零修改
+  api/                    路由蓝图（回测/因子/数据/任务/数据管道）
+  services/                业务逻辑（路由层只做转发）
+  jobs.py                 异步任务（线程池 + 进度回报）
+  store.py                回测结果落盘/检索
+frontend/                 React + Vite + ECharts 控制台
+scripts/                  运维脚本（见下表）
+tests/                    pytest（数据正确性/纯逻辑/因子/回测/股票池/策略注册表/安全）
+data/                     运行时生成，不入 Git：dim/ fact/ factor/ backtest/ meta/ raw/ isolation/ logs/
+```
+
+## 快速开始
+
+```bash
+# 1. 安装依赖（QUANT 环境已装 tushare/pandas/numpy/requests）
+D:\Anaconda\envs\QUANT\python.exe -m pip install -r requirements.txt
+
+# 2. 全历史回补（P1→P7，2-4 小时，可断点续跑）
+D:\Anaconda\envs\QUANT\python.exe scripts/backfill.py
+
+# 3. 落地因子面板（多因子策略/因子评估的前置数据）
+D:\Anaconda\envs\QUANT\python.exe scripts/build_factors.py
+
+# 4. 日度增量（建议交易日 17:30 定时）
+D:\Anaconda\envs\QUANT\python.exe scripts/run_daily.py
+
+# 5. 离线全量校验（建议每月）+ 数据现状报告 + 正确性测试
+D:\Anaconda\envs\QUANT\python.exe scripts/run_checks.py
+D:\Anaconda\envs\QUANT\python.exe scripts/audit.py
+D:\Anaconda\envs\QUANT\python.exe -m pytest tests/ -q
+```
+
+Tushare token 从环境变量 `TUSHARE_TOKEN` 或 `info.txt` 读取（`info.txt` 含明文 token，**已被
+`.gitignore` 排除，切勿提交到版本库**）。
+
+### 脚本一览
+
+| 脚本 | 作用 |
+|---|---|
+| `backfill.py` | 全历史/分阶段回补（P1~P7），见下表；`--phases`/`--start`/`--end`/`--no-resume` |
+| `run_daily.py` | 日度增量：近 10 个交易日内失败自动回补 |
+| `run_checks.py` | 离线全量校验：财务 PIT(C5xx) + 区间表(C505/C506/C206) + 复权探针(C601) |
+| `audit.py` | 数据现状报告：各表行数/跨度/覆盖率 + 同步日志 + 校验结果 |
+| `build_factors.py` | 计算并落地因子面板 `data/factor/{raw,processed}.parquet`；`--start`/`--freq` |
+| `eval_factor.py` | 单/全因子有效性报告；`--factor BP\|all` `--start` `--end` `--pool` |
+| `run_backtest.py` | CLI 回测；`--combiner equal\|ic` `--industry-neutral` `--topn` `--pool` |
+| `run_web.py` | 启动 Flask API（:5000）；`--prod` 用 waitress |
+
+### 分阶段回补
+
+```bash
+python scripts/backfill.py --phases p1 p2          # 只跑地基与日线
+python scripts/backfill.py --start 20200101 --end 20201231
+python scripts/backfill.py --phases p6 --no-resume # 财务全量重拉
+```
+
+| 阶段 | 内容 | 主要接口 |
+|---|---|---|
+| P1 | 交易日历 / 股票基本信息(含退市) / 更名 | trade_cal, stock_basic, namechange |
+| P2 | 日线行情(+复权+涨跌停+停牌+ST) + C601 | daily, adj_factor, stk_limit |
+| P4 | 每日估值市值 | daily_basic |
+| P5 | 成分股区间(沪深300/中证500/中证1000/上证50) / 行业区间 | index_weight, index_classify, index_member_all |
+| P6 | 财务数据 + PIT | income, balancesheet, cashflow, fina_indicator |
+| P7 | 指数日线 / 无风险利率(yc_cb→shibor→常量兜底) | index_daily, yc_cb/shibor |
+
+## 核心设计原则
+
+- **只存原始价 + 复权因子，不存复权价**。复权价使用时算：后复权=`close*adj_factor`。
+- **财务数据一律 PIT**：主键含 `ann_date`，查询只走 `pit.get_financial_pit(date)`（按 `ann_date<=T` 取最新版本）。
+- **区间表存成分股/行业**，消除幸存者偏差；退市股全保留。
+- **写入前校验**：FATAL 违规行入隔离区，其余入主表；ERROR/WARN 记录到 `meta_check_result`。
+- **幂等可重跑**：任一天重复执行结果一致，失败按 `meta_sync_log` 自动回补。
+- **涉及外部输入的 SQL 一律参数化**：`storage.query(sql, params)` 用 `?` 占位符，禁止把
+  HTTP 请求参数直接 f-string 拼进 SQL（历史教训见下文「安全」一节）。
+
+## 测试与数据质量
+
+`tests/`（pytest，120 项）：
+- **数据正确性**（`test_data_quality.py`）：结构/主键、行情不变量（OHLC、pct_chg、复权连续 C601）、
+  跨表一致（`total_mv≈close×股本`）、PIT 无未来泄漏、覆盖完整、区间表、日历真值。
+- **因子正确性**（`test_factor_correctness.py`）：公式验证、PIT 无未来、中性化正交、universe 对齐。
+- **股票池**（`test_universe_pools.py`）：基础池不变量、组合算子语义(and/or/then/without)、
+  排序池边界、spec 解析。
+- **策略注册表**（`test_strategy_registry.py`）：注册枚举、参数合并、协议满足、调仓频率与
+  因子面板不匹配防护。
+- **回测引擎**（`test_backtest.py`）：合成行情确定性断言（涨跌停/停牌/退市/现金约束）+ 真实数据基准 sanity。
+- **安全回归**（`test_security.py`）：SQL 注入拒绝 + 正常请求放行（见下文）。
+- **纯逻辑单测**（`test_logic.py`，合成数据）：区间重建、重叠消除、幂等写、PIT 选版。
+
+> 测试严格验证**管道正确性与内部/跨表一致**，无法单独证明上游 Tushare 原始数值绝对准确。
+> 已知数据边界：所有复权/覆盖异常集中在**北交所 .BJ**（代码迁移，且不在中证500 池内，检查中已排除）；
+> 另有 2 处厂商字段瑕疵（金域医学 603882 的 float>total、300262 增发日市值口径），已在测试中标注容忍。
+> **非北交所主板/创业板/科创板数据在所有不变量上干净。**
+
+## 使用数据
+
+```python
+import sys; sys.path.insert(0, "D:/QUANT")
+from quant_data import storage, calendar, pit
+
+# 某历史日期的成分股 / 在市股票，用交易日历取日期
+dates = calendar.get_trade_dates("20200101", "20201231")
+
+# 日线行情（DuckDB SQL 直查 Parquet）
+df = storage.read_fact("daily_quote", where="trade_date='20200630'")
+
+# 财务数据必须走 PIT，防未来函数
+fin = pit.get_financial_pit("20200630")
+```
+
+---
+
+## 因子层 `quant_factor/`
+
+13 个因子 / 7 大风格，全自研 pandas+numpy，周频，中证500 域。
+
+| 风格 | 因子 |
+|---|---|
+| 价值 | BP, EP, SP |
+| 规模 | LNCAP |
+| 反转/动量 | REV20, MOM120 |
+| 波动 | VOL20 |
+| 流动性 | TURN20, ILLIQ(Amihud) |
+| 质量 | ROE, GPM |
+| 成长 | NPYoY, ORYoY |
+
+处理流程：去极值(MAD) → 行业(SW L1)+市值中性化(OLS 残差) → 标准化(zscore)。
+财务因子一律走 `pit.get_financial_pit`（`ann_date<=T`），杜绝未来函数。
+
+### 股票池 `quant_factor/universe/`（基础池 + 可插拔池）
+
+两层分离：**基础池 BasePool**（恒定可投性硬约束：有行情∧非停牌∧非ST∧上市满N日）永远最先执行；
+**可插拔池 Pool** 在其输出之上再筛/排序/组合。`pool` 参数是可解析的 spec，三种形态：
+
+- **字符串简写**：`all`、`csi500`/`hs300`/`csi1000`/`sz50`、`index:000905.SH`、
+  `size.bottom:200`（市值最小200只）、`size.top:200`、`size.q:0.0-0.3`（市值分位带）、
+  `liquidity.top:300`（成交额最高300）、`industry:801780.SI,801150.SI`（SW一级行业子集）、
+  `board:创业板`（主板/创业板/科创板/北交所）、`custom:600519.SH,000858.SZ`（静态名单）
+- **dict 组合**：`and`(交) / `or`(并) / `then`(串联管道) / `without`(减)，可嵌套。
+  例：`{"then": [{"index":"000852.SH"}, {"size":{"bottom":100}}]}` = 中证1000 里市值最小100只；
+  流动性可指定口径 `{"liquidity":{"top":300,"by":"turnover"}}`（换手率，默认成交额）
+- **Pool 对象**：代码内直接构造
+
+内置池：`all` / `index`(指数成分) / `size`(市值) / `liquidity`(流动性) / `industry`(SW行业) /
+`board`(板块) / `custom`(名单)。成员型（index/industry/board/custom）与 `and` 取交、`or` 取并；
+排序型（size/liquidity）跟成员池后用 `then` 在成员集合内排序，不能用 `and`（会先全市场排序再取交集）。
+
+所有池 PIT 安全：指数/行业用区间成员表（`in_date<=T<out_date`），市值/流动性用当日横截面，无未来函数。
+新增池只需实现 `apply(upstream)->frame` + `@register_pool`，解析与全部调用点零改动。
+`universe_frame`/`get_universe` 签名不变，`pool` 默认仍 `'csi500'`。
+广基指数成分（300/500/1000/50）由 `scripts/backfill.py --phases p5` 回补至 `dim_index_member`。
+
+```bash
+# 单/全因子有效性报告（IC/RankIC/ICIR/分组/多空/衰减 + 相关性矩阵）
+D:\Anaconda\envs\QUANT\python.exe scripts/eval_factor.py --factor REV20
+D:\Anaconda\envs\QUANT\python.exe scripts/eval_factor.py --factor all --start 20160101
+
+# 落地全历史因子面板（data/factor/raw.parquet, processed.parquet）
+D:\Anaconda\envs\QUANT\python.exe scripts/build_factors.py
+
+# 因子正确性测试（公式验证 + PIT无未来 + 中性化正交）
+D:\Anaconda\envs\QUANT\python.exe -m pytest tests/test_factor_correctness.py -q
+```
+
+**正确性 vs 有效性**：正确性由测试保证（算得对、无前视）；有效性用真实数据的
+RankIC/ICIR/t/多空 Sharpe 度量，`eval_factor.py` 给"强/可用/无效"判定，供人工筛选进入多因子合成。
+
+**调仓频率与因子面板一致性**：`data/factor/processed.parquet` 是按固定频率（`config.REBAL_FREQ`，
+默认周频）构建的单一文件。任何消费面板的地方（策略构建、因子评估）在使用前都会调用
+`compute.check_dates_coverage(dates, panel)` 校验请求的调仓日在面板里的真实命中率，命中率过低
+（<90%，通常意味着调仓频率与面板构建频率不一致，例如面板是周频、却选了月频调仓）会直接报错，
+而不是静默产生"几乎不调仓"的错误结果。若确实需要不同频率，先用 `build_factors.py --freq M`
+按目标频率重建面板。
+
+---
+
+## 策略层 `quant_strategy/`
+
+**可插拔策略注册表**（`quant_strategy/base.py`）：新增策略无需改动引擎、回测服务或前端代码。
+
+```python
+# quant_strategy/strategies/xxx.py
+PARAM_SCHEMA = [   # 驱动前端表单自动渲染，type: factors/int/float/bool/select
+    {"key": "topn", "type": "int", "label": "持股数", "default": 50},
+    ...
+]
+
+@register_strategy("my_strategy", "策略中文名", "一句话说明", PARAM_SCHEMA)
+def _build(params: dict, ctx: StrategyContext) -> Strategy:
+    ...  # ctx 提供 dates / pool / get_panel()（懒加载，不用因子面板的策略零成本跳过）/ progress()
+    return MyStrategy(...)   # 只需实现 target_weights(T) -> Series
+```
+
+在 `strategies/__init__.py` 加一行 `import` 触发注册即可；前端「新建回测」的策略下拉框、参数表单
+会自动出现该策略，零改前端代码。当前已注册策略：
+
+| 策略 id | 中文名 | 说明 |
+|---|---|---|
+| `multifactor` | 多因子选股 | 多因子合成打分（等权 z-score / 滚动 IC 加权），域内取 top-N 等权，可选行业中性 |
+
+**多因子选股**的可插拔部件（换任一部件，引擎代码零改动）：
+- `Combiner`：`EqualWeightCombiner`（等权 z-score，默认）/ `RollingICCombiner`（滚动 IC 加权，
+  严格用 `index < T` 的历史 IC，防未来函数）
+- `construct`：top-N 等权 / 行业中性（行业目标权重=域内等权基准占比）
+- `constraints`：个股权重上限等后处理
+
+```bash
+D:\Anaconda\envs\QUANT\python.exe scripts/run_backtest.py --start 20160101 --end 20241231
+D:\Anaconda\envs\QUANT\python.exe scripts/run_backtest.py --combiner ic --industry-neutral --topn 100 --pool csi500
+```
+
+---
+
+## 回测层 `quant_backtest/`
+
+纯多头选股、对标中证500。**引擎与策略完全解耦**：引擎只接收 `weights_fn(T) -> Series` 目标权重，
+不关心权重怎么来的；`MarketData` 依赖注入（生产读库、测试注入合成行情做确定性断言）。
+
+**回测准确性要点**：
+- 信号 T 收盘生成 → **T+1 开盘成交**（结构上无前视）
+- **涨停买不进、跌停卖不掉、停牌不可交易、退市强平**（买不进则不买；卖不掉则继续持有）
+- 真实费率：佣金万2.5(最低5元)、印花税卖出千1（**2023-08-28 起万5**）、过户费万0.1、滑点万5；
+  同时输出**零成本对照**
+- 后复权计价（分红送转由复权因子吸收）、停牌按最后价盯市、**逐日盯市**算回撤
+- 最小交易金额过滤 + 费用不超过成交额，杜绝碎股与负现金
+- 换手口径为**真单边**（双边成交额 ÷ 2 ÷ 调仓前净值），与年化换手标签一致
+
+已知的一处执行细节：买入缩放的成本估算用聚合金额估算最低佣金（非逐笔），当单笔金额远小于约
+2 万元时（如持股数很大或资金较小）会轻微低估总成本，可能导致排序靠后的股票被多削减一点；
+现金不为负的不变量始终成立（有测试覆盖），只是执行公平性上的一个已知细微偏差。
+
+```bash
+# 引擎可靠性测试（合成行情确定性断言 + 真实数据基准 sanity）
+D:\Anaconda\envs\QUANT\python.exe -m pytest tests/test_backtest.py -q
+```
+
+---
+
+## 可视化控制台 `quant_web/`（Flask API） + `frontend/`（React）
+
+**独立新增层**：只 `import` 上述四个包，不修改它们的任何文件；产物写入 `data/backtest/`。
+
+```bash
+# 1) 启动 API（终端一）
+D:\Anaconda\envs\QUANT\python.exe scripts/run_web.py          # http://127.0.0.1:5000
+
+# 2) 启动前端（终端二）
+cd frontend && npm install && npm run dev                     # http://localhost:5173（被占用会自动换端口）
+```
+
+三个页面：
+
+- **回测分析**：可选**策略**（下拉框，参数表单按策略的 `PARAM_SCHEMA` 自动渲染）、可视化**股票池
+  构建器**（基础指数/板块 + 行业多选 + 市值/流动性叠加筛选，或直接写 JSON 组合 spec，实时预览）、
+  频率/初始资金/个股权重上限等参数；超额净值曲线、净值三线（含成本/零成本/基准）、回撤水下图、
+  滚动12月超额、分年度收益、累计成本、每期换手、行业暴露（组合 vs 基准）、持仓明细、交易流水
+  （均支持 CSV 导出，交易流水目前受服务端单页上限 1000 条约束，超出会截断——见「已知限制」）；
+  支持删除历史回测记录；发起新回测走异步任务（进度条）。
+- **因子分析**：同款股票池构建器（评估域应与选股域保持一致）、因子子集选择、有效性总览表
+  （RankIC/ICIR/t/多空Sharpe + 强·可用·无效判定）、累计 RankIC 曲线、分组收益、IC 衰减、相关性热力图。
+- **数据概览**：各表行数与跨度、逐年覆盖、校验结果、同步日志；顶部**数据管理控制台**可直接从页面
+  触发日度增量、分阶段回补（勾选阶段+区间+断点续补）、离线校验、重建因子面板，均为异步任务、
+  带进度与结果回显——不再需要开终端跑脚本。
+
+设计要点：
+- 回测/因子评估/数据运维耗时数分钟，一律走**异步任务**（`POST` 拿 `job_id`，前端轮询 `/api/jobs/{id}`）
+- 聚合在 DuckDB 侧完成，不把千万级行传给前端；净值支持降采样
+- 回测结果落盘 `data/backtest/{run_id}/`，界面默认浏览历史结果，点「新建回测」才重算
+- 因子评估结果按参数哈希缓存到 `data/factor/eval/`
+
+### 已知限制（尚未实现，欢迎按需增量补）
+
+- 交易流水 CSV 导出受服务端 `size` 硬上限（1000 条）约束，超过 1000 笔的回测导出不完整，无截断提示。
+- 无个股 K 线页（后端 `kline`/`search` 接口已就绪，未接前端）。
+- 无全局任务中心（`/api/jobs` 列表接口存在，未接前端；离开页面看不到后台任务）。
+- 无多次回测并排对比视图。
+
+## 安全
+
+历史上曾在 `个股K线`（`data_service.kline`）与 `MarketData.from_storage` 两处把 HTTP 请求参数
+（`ts_code`/`start`/`end`）直接用 f-string 拼进 DuckDB SQL，可被 `xxx' OR '1'='1` 之类 payload
+注入、绕过过滤条件甚至读取任意本地文件（DuckDB 支持 `read_parquet`/`read_csv` 表函数）。
+**已修复**（2026-07-28）：`storage.query()` 扩展为支持 `params` 参数化查询（`?` 占位符），
+两处调用点改为参数化 + 输入格式/存在性校验；`tests/test_security.py` 固定回归。
+
+**约定**：任何拼 SQL 的值只要来自 HTTP 请求参数（而非内部计算出的交易日历/universe 结果），
+一律走 `storage.query(sql, params)`，不得用 f-string 直接拼接。
+
+---
+
+## 阶段记录
+
+详见 [CHANGELOG.md](CHANGELOG.md)。

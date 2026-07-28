@@ -1,0 +1,8 @@
+# A 股量化系统 · 数据层依赖
+# QUANT 环境已预装 tushare / pandas / numpy / requests，本文件补充数据层所需。
+tushare>=1.4.29
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+duckdb>=1.0
+pytest>=7.0            # 测试（tests/）
