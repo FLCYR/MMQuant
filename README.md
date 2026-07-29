@@ -339,6 +339,25 @@ D:\Anaconda\envs\QUANT\pythonw.exe scripts/scheduler.py           # 后台常驻
 `scripts/run_live.py` 仍保留作为一次性手动/补跑入口，与 `scheduler.py` 共用同一段
 逻辑（`live_service.daily_cycle()`），行为完全一致。
 
+### 云服务器部署（原生部署，无 Docker）
+
+已部署实例：`http://8.134.192.201:8080`（与同机的其它项目共用服务器，走独立端口/
+虚拟环境/systemd service，互不干扰）。
+
+- 代码：服务器 `/var/www/mmquant` 是本仓库的 `git clone`（HTTPS，公开仓库无需认证）
+- Python：`python3.11 -m venv venv` + `pip install -r requirements.txt`
+- 数据：`data/`（gitignore，不进仓库）打包 `tar` 传过去，不在服务器上重新 backfill
+- 前端：本地 `npm run build` 打包，`dist/` 传到服务器，nginx 直接挂静态文件
+- Token：不写明文 `info.txt`，落在服务器 `/etc/mmquant.env`（`chmod 600`，仅 root
+  可读），两个 systemd service 用 `EnvironmentFile=` 引用
+- 两个 systemd service：`mmquant-api`（`run_web.py --prod`，waitress，只监听
+  127.0.0.1:5000）+ `mmquant-scheduler`（`scheduler.py`，见上）
+- nginx：独立 `conf.d/mmquant.conf`，监听 8080，`/` 挂前端静态文件，`/api/` 反代到
+  127.0.0.1:5000
+
+**以后同步改动**：改完代码在本地跑 `bash scripts/deploy.sh` 即可——推代码到
+GitHub、本地打包前端、同步到服务器、服务器拉最新代码、重启两个 service，全自动。
+
 ---
 
 ## 可视化控制台 `quant_web/`（Flask API） + `frontend/`（React）
