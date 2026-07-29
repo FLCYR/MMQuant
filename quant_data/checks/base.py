@@ -56,6 +56,24 @@ def run_checks(df: pd.DataFrame, rules, table_name: str, biz_date: str) -> list[
     return results
 
 
+def split_reject(results: list[CheckResult]) -> tuple[set[str], bool]:
+    """从校验结果中拆出：需要行级隔离的 key 集合 + 是否命中批级 FATAL（整批处置）。
+
+    fail_keys 为 None 的 FATAL 失败（批级规则本身，或规则函数执行异常被 run_checks
+    降级包装）必须触发整批处置，否则会出现"规则检测失败=不隔离任何数据+记成
+    SUCCESS"的 fail-open：校验器自己出错时反而是危害最大的路径。"""
+    reject: set[str] = set()
+    batch_reject = False
+    for r in results:
+        if r.passed or r.level != "FATAL":
+            continue
+        if r.fail_keys:
+            reject |= set(r.fail_keys)
+        else:
+            batch_reject = True
+    return reject, batch_reject
+
+
 def worst_level(results: list[CheckResult]) -> str | None:
     lvl = None
     for r in results:

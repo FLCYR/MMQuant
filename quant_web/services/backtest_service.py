@@ -27,6 +27,7 @@ DEFAULT_STRATEGY = "multifactor"
 
 def default_params() -> dict:
     return {
+        "name": "",
         "start": "20160101",
         "end": datetime.now().strftime("%Y%m%d"),
         "freq": config.REBAL_FREQ,
@@ -59,6 +60,7 @@ def run_and_save(job_id: str, params: dict) -> dict:
     strategy_params = {**strat_base.default_params(strategy_id), **(p.get("strategy_params") or {})}
     p["strategy"] = strategy_id
     p["strategy_params"] = strategy_params          # 落盘的是合并默认值后的完整参数
+    p["name"] = (p.get("name") or "").strip()
 
     jobs.progress(job_id, "准备调仓日", 5)
     dates = get_rebalance_dates(p["start"], p["end"], p["freq"])

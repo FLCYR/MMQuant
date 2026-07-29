@@ -1,9 +1,12 @@
-"""安全回归测试：曾发现并修复的两处 SQL 注入。
+"""安全回归测试：曾发现并修复的 SQL 注入（MarketData.from_storage）。
 
-漏洞背景：`data_service.kline` 与 `MarketData.from_storage` 曾把 HTTP 请求里的
-ts_code/start/end 直接用 f-string 拼进 DuckDB SQL；构造 `xxx' OR '1'='1` 之类
-payload 可绕过 WHERE 条件、拿到全表数据。修复：改参数化查询（`?` 占位符）+
-输入格式/存在性校验。这里固定住"恶意输入必须被拒绝、正常输入必须放行"两端。
+漏洞背景：`MarketData.from_storage` 曾把 HTTP 请求里的 start/end 直接用 f-string
+拼进 DuckDB SQL；构造 `xxx' OR '1'='1` 之类 payload 可绕过 WHERE 条件、拿到全表
+数据。修复：改参数化查询（`?` 占位符）+ 输入格式校验。这里固定住"恶意输入必须
+被拒绝、正常输入必须放行"两端。
+
+（另一处历史注入点 `data_service.kline` 连同个股 K 线功能已整体移除，不再需要
+对应回归测试。）
 """
 from __future__ import annotations
 
@@ -11,7 +14,6 @@ import pytest
 
 from quant_data import storage
 from quant_backtest.market import MarketData
-from quant_web.services import data_service
 
 LIQUID = "600519.SH"          # 贵州茅台，几乎不停牌，覆盖率高
 
@@ -21,28 +23,6 @@ def _has_data() -> bool:
 
 
 pytestmark = pytest.mark.skipif(not _has_data(), reason="无数据，请先 backfill")
-
-
-# ---------------------------------------------------------------- kline
-def test_kline_rejects_ts_code_injection():
-    with pytest.raises(ValueError):
-        data_service.kline("NOPE' OR '1'='1", "20230101", "20230103")
-
-
-def test_kline_rejects_date_injection():
-    with pytest.raises(ValueError):
-        data_service.kline(LIQUID, "20230101", "20230101' OR '1'='1")
-
-
-def test_kline_rejects_unknown_but_wellformed_code():
-    """格式合法但不存在的代码也应拒绝（真实存在性校验，不只是正则）。"""
-    with pytest.raises(ValueError):
-        data_service.kline("999999.SH", "20230101", "20230110")
-
-
-def test_kline_accepts_valid_request():
-    r = data_service.kline(LIQUID, "20230101", "20230110")
-    assert len(r["rows"]) > 0
 
 
 # ---------------------------------------------------------------- MarketData

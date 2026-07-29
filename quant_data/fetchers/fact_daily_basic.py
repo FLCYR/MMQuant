@@ -42,19 +42,25 @@ def sync_day(client: TushareClient, trade_date: str, validate: bool = True) -> i
         return 0
 
     reject: set[str] = set()
+    batch_reject = False
     if validate:
         results = base.run_checks(df, rules_basic.RULES, "fact_daily_basic", trade_date)
         base.persist(results)
         base.log_failures(results)
-        for r in results:
-            if not r.passed and r.level == "FATAL" and r.fail_keys:
-                reject |= set(r.fail_keys)
+        reject, batch_reject = base.split_reject(results)
 
-    main = df[~df["ts_code"].isin(reject)] if reject else df
-    if reject:
-        storage.write_isolation(TASK, trade_date, df[df["ts_code"].isin(reject)])
+    if batch_reject:                                    # 批级 FATAL（含规则自身异常）：整批隔离，不入正式表
+        main = df.iloc[0:0]
+        storage.write_isolation(TASK, trade_date, df)
+        status, err = "FAILED", "批级校验失败，整批隔离（详见 meta_check_result）"
+    else:
+        main = df[~df["ts_code"].isin(reject)] if reject else df
+        if reject:
+            storage.write_isolation(TASK, trade_date, df[df["ts_code"].isin(reject)])
+        status, err = ("PARTIAL", f"隔离 {len(reject)} 行") if reject else ("SUCCESS", "")
+
     n = storage.write_fact("daily_basic", main, part_col="trade_date", keys=KEYS)
-    synclog.record(TASK, trade_date, "PARTIAL" if reject else "SUCCESS", n, start_time=start)
+    synclog.record(TASK, trade_date, status, n, error_msg=err, start_time=start)
     return n
 
 

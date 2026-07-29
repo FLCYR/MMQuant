@@ -23,6 +23,10 @@ def _dir(run_id: str):
     return webconfig.LIVE_DIR / run_id
 
 
+def exists(run_id: str) -> bool:
+    return _dir(run_id).exists()
+
+
 def new_run_id(strategy_id: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{ts}_{strategy_id}"

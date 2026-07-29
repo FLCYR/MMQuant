@@ -1,35 +1,14 @@
-"""数据服务：数据概览、校验结果、同步日志、个股 K 线。
+"""数据服务：数据概览、校验结果、同步日志。
 
 聚合一律在 DuckDB 侧完成，不把千万级行拉进 Python。
 """
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pandas as pd
 
 import config
-from quant_data import calendar, storage
-
-_DATE_RE = re.compile(r"^\d{8}$")
-
-
-def _validate_date(d: str, field: str = "日期") -> str:
-    """校验 YYYYMMDD 格式；HTTP 参数在拼入/传入 SQL 前必须过这一关，防注入。"""
-    d = str(d)
-    if not _DATE_RE.match(d):
-        raise ValueError(f"{field}格式非法（应为 YYYYMMDD）：{d!r}")
-    return d
-
-
-def _validate_ts_code(ts_code: str) -> str:
-    """校验 ts_code 确实存在于 stock_basic——比正则白名单更严格（真实存在性校验），
-    杜绝任何拼接注入。"""
-    sb = storage.read_dim("stock_basic")
-    if sb.empty or ts_code not in set(sb["ts_code"]):
-        raise ValueError(f"未知股票代码：{ts_code!r}")
-    return ts_code
+from quant_data import storage
 
 _FACTS = [("daily_quote", "ts_code", "trade_date"),
           ("daily_basic", "ts_code", "trade_date"),
@@ -99,43 +78,6 @@ def sync_log(limit: int = 500) -> dict:
             bad[c] = bad[c].astype(str)
     return {"summary": [{k: (int(v) if k == "n" else v) for k, v in r.items()} for r in summary],
             "failures": bad.replace({np.nan: None}).to_dict("records")}
-
-
-def kline(ts_code: str, start: str, end: str, limit: int = 1200) -> dict:
-    """个股 K 线（原始价，标注涨跌停/停牌），供前端画蜡烛图。"""
-    ts_code = _validate_ts_code(ts_code)
-    start = _validate_date(start, "起始日")
-    end = _validate_date(end, "结束日")
-    src = storage.fact_source("daily_quote")
-    if not src:
-        return {"rows": []}
-    df = storage.query(f"""
-        SELECT CAST(trade_date AS VARCHAR) trade_date, open, high, low, close, vol, amount,
-               adj_factor, limit_up, limit_down, is_suspended, is_st
-        FROM {src}
-        WHERE ts_code=? AND trade_date>=? AND trade_date<=?
-        ORDER BY trade_date
-    """, [ts_code, start, end])
-    if df.empty:
-        return {"rows": []}
-    if len(df) > limit:
-        df = df.tail(limit)
-    df = df.replace({np.nan: None})
-    return {"ts_code": ts_code, "rows": df.to_dict("records")}
-
-
-def search_stocks(q: str, limit: int = 20) -> list[dict]:
-    sb = storage.read_dim("stock_basic")
-    if sb.empty or not q:
-        return []
-    m = sb[sb["ts_code"].str.contains(q, case=False, na=False) |
-           sb["name"].astype(str).str.contains(q, case=False, na=False)]
-    cols = [c for c in ["ts_code", "name", "market", "list_date", "list_status"] if c in m.columns]
-    return m.head(limit)[cols].replace({np.nan: None}).to_dict("records")
-
-
-def trade_dates(start: str, end: str) -> list[str]:
-    return calendar.get_trade_dates(start, end)
 
 
 def list_industries() -> list[dict]:

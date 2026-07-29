@@ -33,16 +33,3 @@ def quality():
 @bp.get("/data/synclog")
 def synclog():
     return jsonify(data_service.sync_log(int(request.args.get("limit", 500))))
-
-
-@bp.get("/stocks/search")
-def search():
-    return jsonify(data_service.search_stocks(request.args.get("q", ""),
-                                              int(request.args.get("limit", 20))))
-
-
-@bp.get("/stocks/<ts_code>/kline")
-def kline(ts_code: str):
-    start = request.args.get("start", "20230101")
-    end = request.args.get("end", datetime.now().strftime("%Y%m%d"))
-    return jsonify(data_service.kline(ts_code, start, end))

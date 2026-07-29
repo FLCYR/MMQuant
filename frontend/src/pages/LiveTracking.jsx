@@ -13,6 +13,11 @@ function strategyLabel(strategies, id) {
   return (strategies || []).find((s) => s.id === id)?.label || id
 }
 
+// 跟踪实例显示名：优先用户自定义 name，否则退回 run_id（旧记录无 name 字段）
+function runLabel(s) {
+  return s?.name?.trim() || s?.run_id || ''
+}
+
 export default function LiveTracking() {
   const [list, setList] = useState([])
   const [runId, setRunId] = useState('')
@@ -75,7 +80,7 @@ export default function LiveTracking() {
   }
 
   async function doDelete() {
-    if (!runId || !window.confirm(`删除跟踪实例 ${runId}？此操作不可恢复。`)) return
+    if (!runId || !window.confirm(`删除跟踪实例 ${runLabel(state) || runId}？此操作不可恢复。`)) return
     await api.liveDelete(runId)
     const rs = await reloadList()
     setRunId(rs.length ? rs[0].run_id : '')
@@ -95,7 +100,7 @@ export default function LiveTracking() {
             {list.length === 0 && <option value="">（暂无跟踪实例）</option>}
             {list.map((s) => (
               <option key={s.run_id} value={s.run_id}>
-                {s.run_id}　{strategyLabel(defaults?.strategies, s.strategy)}　{poolLabel(s.pool)}
+                {runLabel(s)}　{strategyLabel(defaults?.strategies, s.strategy)}　{poolLabel(s.pool)}
                 　{s.status === 'stopped' ? '（已停止）' : ''}
               </option>
             ))}
@@ -109,8 +114,8 @@ export default function LiveTracking() {
 
       <div className="muted" style={{ fontSize: 12.5, marginBottom: 14 }}>
         纸上模拟：每天自动拉最新数据、算出目标持仓，与前一日对比生成买卖信号并虚拟记账——
-        不接触任何真实资金或券商账户。调度由 Windows 任务计划程序每日触发
-        （<code>python scripts/run_live.py</code>），本页"立即推进一天"仅供测试/补跑手动触发。
+        不接触任何真实资金或券商账户。调度由 Python 定时任务每日触发
+        （<code>python scripts/scheduler.py</code>），本页"立即推进一天"仅供测试/补跑手动触发。
       </div>
 
       <ErrorBox error={error} />
@@ -131,10 +136,12 @@ export default function LiveTracking() {
       {!loading && detail && (
         <>
           <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+            {state.name?.trim() && <><b>{state.name}</b>　·　</>}
             创建于 {state.created_at}　·　策略 <b>{strategyLabel(defaults?.strategies, state.strategy)}</b>
             　·　股票池 <b>{poolLabel(state.pool)}</b>　·　频率 {state.freq === 'M' ? '月频' : '周频'}
             　·　最后推进至 <b>{state.last_advanced_date}</b>
             　·　状态 {state.status === 'active' ? '运行中' : '已停止'}
+            {state.source_label && <>　·　参数复用自回测 <b>{state.source_label}</b></>}
           </div>
 
           <div className="cards">
@@ -201,14 +208,24 @@ export default function LiveTracking() {
 
 function CreateForm({ defaults, onSubmit, onCancel }) {
   const strategies = defaults.strategies || []
-  const [f, setF] = useState({ freq: 'W', cash: 1e7 })
+  const [mode, setMode] = useState('manual')   // 'manual' | 'copy'（复用已有回测参数）
+  const [backtestRuns, setBacktestRuns] = useState(null)
+  const [sourceRunId, setSourceRunId] = useState('')
+  const [copiedPool, setCopiedPool] = useState(null)   // copy 模式下直接取自回测，不经 PoolPicker
+
+  const [f, setF] = useState({ name: '', freq: 'W', cash: 1e7 })
   const [strategyId, setStrategyId] = useState(strategies[0]?.id || '')
   const [sp, setSp] = useState(schemaDefaults(strategies[0]?.param_schema))
   const [pool, setPool] = useState({ spec: null, err: null })
 
+  useEffect(() => {
+    if (mode === 'copy' && backtestRuns === null) api.runs().then(setBacktestRuns).catch(() => setBacktestRuns([]))
+  }, [mode, backtestRuns])
+
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }))
   const curStrategy = strategies.find((s) => s.id === strategyId)
   const factorsField = curStrategy?.param_schema?.find((x) => x.type === 'factors')
+  const sourceRun = (backtestRuns || []).find((r) => r.run_id === sourceRunId)
 
   function changeStrategy(id) {
     setStrategyId(id)
@@ -221,61 +238,122 @@ function CreateForm({ defaults, onSubmit, onCancel }) {
       const cur = s[key] || []
       return { ...s, [key]: cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name] }
     })
-  const factorsEmpty = factorsField && !(sp[factorsField.key] || []).length
+  const factorsEmpty = mode === 'manual' && factorsField && !(sp[factorsField.key] || []).length
+
+  // 选中某个回测：直接套用其策略/参数/股票池/频率，不再重新走选择流程
+  function pickSource(id) {
+    setSourceRunId(id)
+    const run = (backtestRuns || []).find((r) => r.run_id === id)
+    if (!run) return
+    const rp = run.params || {}
+    setStrategyId(rp.strategy || strategies[0]?.id || '')
+    setSp(rp.strategy_params || {})
+    setCopiedPool(rp.pool ?? null)
+    setF((s) => ({ ...s, freq: rp.freq || 'W', cash: rp.cash ?? s.cash }))
+  }
 
   function submit() {
-    onSubmit({ pool: pool.spec, freq: f.freq, cash: Number(f.cash), strategy: strategyId, strategy_params: sp })
+    if (mode === 'copy') {
+      if (!sourceRun) return
+      onSubmit({
+        name: f.name, pool: copiedPool, freq: f.freq, cash: Number(f.cash), strategy: strategyId, strategy_params: sp,
+        source_run_id: sourceRun.run_id, source_label: sourceRun.params?.name?.trim() || sourceRun.run_id,
+      })
+      return
+    }
+    onSubmit({ name: f.name, pool: pool.spec, freq: f.freq, cash: Number(f.cash), strategy: strategyId, strategy_params: sp })
   }
 
   return (
     <Panel title="新建跟踪">
       <div className="row" style={{ marginBottom: 12 }}>
-        <label className="field">
-          策略
-          <select value={strategyId} onChange={(e) => changeStrategy(e.target.value)}>
-            {strategies.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </select>
+        <label className="field">名称（可选）<input value={f.name} onChange={set('name')} placeholder="不填则用自动生成的编号" style={{ width: 160 }} /></label>
+        <label style={{ fontSize: 13 }}>
+          <input type="radio" checked={mode === 'manual'} onChange={() => setMode('manual')} /> 手动配置
         </label>
-        <label className="field">调仓频率
-          <select value={f.freq} onChange={set('freq')}>
-            <option value="W">周频</option><option value="M">月频</option>
-          </select>
+        <label style={{ fontSize: 13 }}>
+          <input type="radio" checked={mode === 'copy'} onChange={() => setMode('copy')} /> 复用已有回测的参数
         </label>
-        <label className="field">初始资金<input type="number" value={f.cash} onChange={set('cash')} style={{ width: 120 }} /></label>
-      </div>
-      {curStrategy?.description && (
-        <div className="muted" style={{ fontSize: 12.5, marginTop: -6, marginBottom: 12 }}>{curStrategy.description}</div>
-      )}
-
-      <div style={{ marginBottom: 12 }}>
-        <PoolPicker industries={defaults.industries} initialIndex="000905.SH" onChange={(spec, err) => setPool({ spec, err })} />
       </div>
 
-      {curStrategy && (
-        <div className="row" style={{ marginBottom: 12 }}>
-          {curStrategy.param_schema.filter((x) => x.type !== 'factors').map((field) => (
-            <SchemaField key={field.key} field={field} value={sp[field.key]} onChange={setSpField(field.key)} />
-          ))}
-        </div>
-      )}
-
-      {factorsField && (
-        <div style={{ marginBottom: 12 }}>
-          <div className="muted" style={{ fontSize: 12.5, marginBottom: 6 }}>{factorsField.label}</div>
-          <div className="row">
-            {defaults.factors.map((x) => (
-              <label key={x.name} style={{ fontSize: 13 }}>
-                <input type="checkbox" checked={(sp[factorsField.key] || []).includes(x.name)}
-                  onChange={() => toggleFactor(factorsField.key, x.name)} />
-                {' '}{x.name}<span className="muted">（{x.style}）</span>
-              </label>
-            ))}
+      {mode === 'copy' ? (
+        <>
+          <div className="row" style={{ marginBottom: 12 }}>
+            <label className="field" style={{ minWidth: 340 }}>
+              选择回测
+              <select value={sourceRunId} onChange={(e) => pickSource(e.target.value)}>
+                <option value="">（请选择）</option>
+                {(backtestRuns || []).map((r) => (
+                  <option key={r.run_id} value={r.run_id}>
+                    {r.params?.name?.trim() || r.run_id}　{r.params?.start}~{r.params?.end}　{strategyLabel(defaults?.strategies, r.params?.strategy)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">初始资金<input type="number" value={f.cash} onChange={set('cash')} style={{ width: 120 }} /></label>
           </div>
-        </div>
+          {sourceRun ? (
+            <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+              将复用：策略 <b>{strategyLabel(defaults?.strategies, strategyId)}</b>　·　股票池 <b>{poolLabel(copiedPool)}</b>
+              　·　频率 {f.freq === 'M' ? '月频' : '周频'}
+            </div>
+          ) : (
+            <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+              {backtestRuns === null ? '加载中…' : backtestRuns.length ? '请选择一个回测记录' : '暂无回测记录，请先在「回测分析」页创建'}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="row" style={{ marginBottom: 12 }}>
+            <label className="field">
+              策略
+              <select value={strategyId} onChange={(e) => changeStrategy(e.target.value)}>
+                {strategies.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </label>
+            <label className="field">调仓频率
+              <select value={f.freq} onChange={set('freq')}>
+                <option value="W">周频</option><option value="M">月频</option>
+              </select>
+            </label>
+            <label className="field">初始资金<input type="number" value={f.cash} onChange={set('cash')} style={{ width: 120 }} /></label>
+          </div>
+          {curStrategy?.description && (
+            <div className="muted" style={{ fontSize: 12.5, marginTop: -6, marginBottom: 12 }}>{curStrategy.description}</div>
+          )}
+
+          <div style={{ marginBottom: 12 }}>
+            <PoolPicker industries={defaults.industries} initialIndex="000905.SH" onChange={(spec, err) => setPool({ spec, err })} />
+          </div>
+
+          {curStrategy && (
+            <div className="row" style={{ marginBottom: 12 }}>
+              {curStrategy.param_schema.filter((x) => x.type !== 'factors').map((field) => (
+                <SchemaField key={field.key} field={field} value={sp[field.key]} onChange={setSpField(field.key)} />
+              ))}
+            </div>
+          )}
+
+          {factorsField && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="muted" style={{ fontSize: 12.5, marginBottom: 6 }}>{factorsField.label}</div>
+              <div className="row">
+                {defaults.factors.map((x) => (
+                  <label key={x.name} style={{ fontSize: 13 }}>
+                    <input type="checkbox" checked={(sp[factorsField.key] || []).includes(x.name)}
+                      onChange={() => toggleFactor(factorsField.key, x.name)} />
+                    {' '}{x.name}<span className="muted">（{x.style}）</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       <div className="row">
-        <button className="primary" onClick={submit} disabled={factorsEmpty || !!pool.err}>开始跟踪</button>
+        <button className="primary" onClick={submit} disabled={mode === 'copy' ? !sourceRun : (factorsEmpty || !!pool.err)}>开始跟踪</button>
         <button className="ghost" onClick={onCancel}>取消</button>
         <span className="muted" style={{ fontSize: 12.5 }}>创建即立即计算一次初始信号，下一交易日开盘执行</span>
       </div>

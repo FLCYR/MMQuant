@@ -69,7 +69,7 @@ D:\Anaconda\envs\QUANT\python.exe scripts/backfill.py
 # 3. 落地因子面板（多因子策略/因子评估的前置数据）
 D:\Anaconda\envs\QUANT\python.exe scripts/build_factors.py
 
-# 4. 日度增量（建议交易日 17:30 定时）
+# 4. 日度增量（手动/补跑用；日常自动触发见下方「Python 定时任务」）
 D:\Anaconda\envs\QUANT\python.exe scripts/run_daily.py
 
 # 5. 离线全量校验（建议每月）+ 数据现状报告 + 正确性测试
@@ -93,6 +93,8 @@ Tushare token 从环境变量 `TUSHARE_TOKEN` 或 `info.txt` 读取（`info.txt`
 | `eval_factor.py` | 单/全因子有效性报告；`--factor BP\|all` `--start` `--end` `--pool` |
 | `run_backtest.py` | CLI 回测；`--combiner equal\|ic` `--industry-neutral` `--topn` `--pool` |
 | `run_web.py` | 启动 Flask API（:5000）；`--prod` 用 waitress |
+| `run_live.py` | 手动跑一次「日度增量 + 推进全部实盘跟踪实例」，用于补跑/调试 |
+| `scheduler.py` | Python 定时任务：常驻进程，每天 17:30 自动跑一次 `run_live.py` 的同一段逻辑 |
 
 ### 分阶段回补
 
@@ -319,18 +321,23 @@ D:\Anaconda\envs\QUANT\python.exe -m pytest tests/test_backtest.py -q
   历史——否则每次调仓日都要重算 `MultiFactorStrategy` 的全历史 universe/因子分组，随着实盘运行
   时间变长会越跑越慢。120 期对滚动 IC 合成器所需的 26 期历史留了充足冗余。
 
-### Windows 任务计划程序设置
+### Python 定时任务 `scripts/scheduler.py`
 
-1. 任务计划程序 → 创建基本任务
-2. 触发器：每天，时间建议 17:30（与 `run_daily.py` 的既有约定一致；脚本内部按交易日历
-   自动跳过非交易日，无需额外判断）
-3. 操作：启动程序
-   - 程序/脚本：`D:\Anaconda\envs\QUANT\python.exe`
-   - 参数：`D:\QUANT\scripts\run_live.py`
-   - 起始于：`D:\QUANT`
+不依赖 Windows 任务计划程序：`scripts/scheduler.py` 是一个常驻 Python 进程，内部用
+`datetime` 轮询挂钟时间，每天 17:30 自动触发一次`live_service.daily_cycle()`——
+拉当天最新行情/估值 → 推进全部"运行中"的跟踪实例（若某天漏跑，下次自动补齐中间缺的
+交易日）；非交易日该流程内部自动判空跳过，无需额外判断。触发逻辑幂等，进程重启导致
+同一天触发两次也不会有副作用。
 
-该脚本会先拉当天最新行情/估值，再推进全部"运行中"的跟踪实例（若某天漏跑，下次自动补齐
-中间缺的交易日）。也可以在页面上点"立即推进一天"手动触发，用于测试或补跑。
+```bash
+D:\Anaconda\envs\QUANT\python.exe scripts/scheduler.py            # 前台常驻，Ctrl+C 退出
+D:\Anaconda\envs\QUANT\pythonw.exe scripts/scheduler.py           # 后台常驻，无终端窗口
+```
+
+启动后长期挂着即可（比如开机后手动跑一次，或把第二条命令做成"启动"文件夹里的快捷方式
+以便随开机自动运行）。也可以在页面上点"立即推进一天"手动触发，用于测试或补跑；
+`scripts/run_live.py` 仍保留作为一次性手动/补跑入口，与 `scheduler.py` 共用同一段
+逻辑（`live_service.daily_cycle()`），行为完全一致。
 
 ---
 
@@ -351,8 +358,7 @@ cd frontend && npm install && npm run dev                     # http://localhost
 - **回测分析**：可选**策略**（下拉框，参数表单按策略的 `PARAM_SCHEMA` 自动渲染）、可视化**股票池
   构建器**（基础指数/板块 + 行业多选 + 市值/流动性叠加筛选，或直接写 JSON 组合 spec，实时预览）、
   频率/初始资金/个股权重上限等参数；超额净值曲线、净值三线（含成本/零成本/基准）、回撤水下图、
-  滚动12月超额、分年度收益、累计成本、每期换手、行业暴露（组合 vs 基准）、持仓明细、交易流水
-  （均支持 CSV 导出，交易流水目前受服务端单页上限 1000 条约束，超出会截断——见「已知限制」）；
+  滚动12月超额、分年度收益、累计成本、每期换手、行业暴露（组合 vs 基准）、持仓明细、交易流水；
   支持删除历史回测记录；发起新回测走异步任务（进度条）。
 - **因子分析**：同款股票池构建器（评估域应与选股域保持一致）、因子子集选择、有效性总览表
   （RankIC/ICIR/t/多空Sharpe + 强·可用·无效判定）、累计 RankIC 曲线、分组收益、IC 衰减、相关性热力图。
@@ -371,18 +377,20 @@ cd frontend && npm install && npm run dev                     # http://localhost
 
 ### 已知限制（尚未实现，欢迎按需增量补）
 
-- 交易流水 CSV 导出受服务端 `size` 硬上限（1000 条）约束，超过 1000 笔的回测导出不完整，无截断提示。
-- 无个股 K 线页（后端 `kline`/`search` 接口已就绪，未接前端）。
-- 无全局任务中心（`/api/jobs` 列表接口存在，未接前端；离开页面看不到后台任务）。
 - 无多次回测并排对比视图。
+
+个股 K 线页、全局任务中心、交易流水/持仓 CSV 导出均已评估为个人自用场景下的非必要功能，
+已整体移除（相关后端接口 `stocks/search`、`stocks/<ts_code>/kline`、`/api/jobs` 列表也一并删除，
+仅保留单任务状态查询 `/api/jobs/<job_id>`）。
 
 ## 安全
 
-历史上曾在 `个股K线`（`data_service.kline`）与 `MarketData.from_storage` 两处把 HTTP 请求参数
-（`ts_code`/`start`/`end`）直接用 f-string 拼进 DuckDB SQL，可被 `xxx' OR '1'='1` 之类 payload
-注入、绕过过滤条件甚至读取任意本地文件（DuckDB 支持 `read_parquet`/`read_csv` 表函数）。
-**已修复**（2026-07-28）：`storage.query()` 扩展为支持 `params` 参数化查询（`?` 占位符），
-两处调用点改为参数化 + 输入格式/存在性校验；`tests/test_security.py` 固定回归。
+历史上曾在 `个股K线`（`data_service.kline`，功能已整体移除）与 `MarketData.from_storage` 两处
+把 HTTP 请求参数（`ts_code`/`start`/`end`）直接用 f-string 拼进 DuckDB SQL，可被 `xxx' OR '1'='1`
+之类 payload 注入、绕过过滤条件甚至读取任意本地文件（DuckDB 支持 `read_parquet`/`read_csv` 表
+函数）。**已修复**（2026-07-28）：`storage.query()` 扩展为支持 `params` 参数化查询（`?` 占位符），
+两处调用点改为参数化 + 输入格式/存在性校验；`MarketData.from_storage` 一侧的回归测试保留在
+`tests/test_security.py`。
 
 **约定**：任何拼 SQL 的值只要来自 HTTP 请求参数（而非内部计算出的交易日历/universe 结果），
 一律走 `storage.query(sql, params)`，不得用 f-string 直接拼接。

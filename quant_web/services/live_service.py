@@ -24,6 +24,7 @@ from quant_factor.rebalance import get_rebalance_dates
 from quant_strategy import strategies as _strategies  # noqa: F401  触发所有 @register_strategy
 from quant_strategy import base as strat_base
 from quant_web import jobs, live_store
+from quant_web.services import pipeline_service
 
 DEFAULT_STRATEGY = "multifactor"
 WINDOW_DAYS = 30          # 单日推进取的行情窗口（自然日），覆盖长假足够
@@ -186,6 +187,9 @@ def create(job_id: str, params: dict) -> dict:
     pool = p.get("pool") or config.UNIV_POOL
     freq = p.get("freq") or config.REBAL_FREQ
     cash = float(p.get("cash") or config.INIT_CASH)
+    source_run_id = p.get("source_run_id") or None
+    source_label = (p.get("source_label") or "").strip() or None
+    name = (p.get("name") or "").strip()
 
     jobs.progress(job_id, "确定起始交易日", 10)
     today = _latest_quote_date()
@@ -195,9 +199,11 @@ def create(job_id: str, params: dict) -> dict:
     run_id = live_store.new_run_id(strategy_id)
     state = {
         "run_id": run_id,
+        "name": name,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "strategy": strategy_id, "strategy_params": strategy_params,
         "pool": pool, "freq": freq, "init_cash": cash,
+        "source_run_id": source_run_id, "source_label": source_label,
         "status": "active",
         "last_advanced_date": today,
         "pending_signal": None,
@@ -240,6 +246,12 @@ def advance(run_id: str) -> dict:
 
     n_trades = 0
     for d in todo:
+        if not live_store.exists(run_id):
+            # 并发被删除（网页手动删除 / 与 run_live.py 计划任务的推进撞车）：
+            # 立刻停止，不再写任何文件——否则 mkdir(exist_ok=True) 会把已删除的
+            # 实例目录重新写出来，造成"僵尸复活"。
+            return {"advanced": [d0 for d0 in todo if d0 < d], "n_trades": n_trades,
+                   "message": "实例在推进过程中被删除，已中止"}
         trades = _advance_one_day(state, d)
         live_store.append_trades(run_id, trades)
         live_store.save_state(run_id, state)      # 逐日落盘，防中途失败丢进度
@@ -256,6 +268,16 @@ def advance_all() -> dict:
         except Exception as e:
             results[run_id] = {"error": str(e)}
     return results
+
+
+def daily_cycle() -> dict:
+    """每日一次的完整流程：拉当天最新行情/估值 → 推进全部运行中的实盘跟踪实例。
+
+    等价 scripts/run_daily.py + advance_all 的组合，供 scripts/run_live.py（手动/CLI）
+    与 scripts/scheduler.py（Python 内置定时任务）共用，避免两处各写一份。幂等，
+    重复调用（如定时任务在同一天因重启而触发两次）不会产生副作用。"""
+    update = pipeline_service.daily_update("scheduler", {})
+    return {"data_update": update, "advance": advance_all()}
 
 
 def list_live() -> list[dict]:

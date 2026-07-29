@@ -25,8 +25,6 @@ export const api = {
   overview: () => j('/api/overview'),
   quality: (limit = 200) => j(`/api/data/quality${qs({ limit })}`),
   synclog: () => j('/api/data/synclog'),
-  searchStocks: (q) => j(`/api/stocks/search${qs({ q })}`),
-  kline: (code, start, end) => j(`/api/stocks/${code}/kline${qs({ start, end })}`),
 
   industries: () => j('/api/industries'),
 
@@ -50,7 +48,6 @@ export const api = {
   trades: (id, p) => j(`/api/backtest/runs/${id}/trades${qs(p)}`),
 
   job: (id) => j(`/api/jobs/${id}`),
-  jobs: () => j('/api/jobs'),
 
   // 数据管道（运维操作，均异步）
   pipelineInfo: () => j('/api/pipeline/info'),

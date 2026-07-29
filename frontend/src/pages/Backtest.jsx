@@ -8,18 +8,10 @@ import SchemaField, { schemaDefaults } from '../components/SchemaField'
 const RED = '#d64545'
 const BLUE = '#2f6fed'
 const GRAY = '#98a2b3'
-const GREEN = '#2e9e63'
 
-// CSV 导出：BOM + 引号转义，Excel 直接打开中文不乱码
-function toCsv(rows, cols) {
-  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
-  return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n')
-}
-function download(name, text) {
-  const url = URL.createObjectURL(new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' }))
-  const a = document.createElement('a')
-  a.href = url; a.download = name; a.click()
-  URL.revokeObjectURL(url)
+// 回测显示名：优先用户自定义 name，否则退回 run_id（旧记录无 name 字段）
+function runLabel(r) {
+  return r?.params?.name?.trim() || r?.run_id || ''
 }
 
 // 策略 id → 中文名；旧记录（无 strategy 字段）一律是当年唯一策略"多因子选股"
@@ -137,7 +129,7 @@ export default function Backtest() {
   }
 
   async function removeRun() {
-    if (!runId || !window.confirm(`删除回测记录 ${runId}？此操作不可恢复。`)) return
+    if (!runId || !window.confirm(`删除回测记录 ${runLabel(meta) || runId}？此操作不可恢复。`)) return
     try {
       await api.deleteRun(runId)
       const rs = await api.runs()
@@ -145,11 +137,6 @@ export default function Backtest() {
       if (rs.length) setRunId(rs[0].run_id)
       else { setRunId(''); setMeta(null) }
     } catch (e) { setError(e) }
-  }
-
-  async function exportTrades() {
-    const all = await api.trades(runId, { page: 1, size: 100000 })
-    download(`${runId}_trades.csv`, toCsv(all.rows || [], ['date', 'ts_code', 'side', 'amount', 'cost']))
   }
 
   return (
@@ -161,7 +148,7 @@ export default function Backtest() {
             {runs.length === 0 && <option value="">（暂无回测记录）</option>}
             {runs.map((r) => (
               <option key={r.run_id} value={r.run_id}>
-                {r.run_id}　{r.params?.start}~{r.params?.end}　{strategyLabel(defaults?.strategies, r.params?.strategy)}　{poolLabel(r.params?.pool)}
+                {runLabel(r)}　{r.params?.start}~{r.params?.end}　{strategyLabel(defaults?.strategies, r.params?.strategy)}　{poolLabel(r.params?.pool)}
               </option>
             ))}
           </select>
@@ -191,6 +178,7 @@ export default function Backtest() {
       {!loading && meta && (
         <>
           <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+            {meta.params?.name?.trim() && <><b>{meta.params.name}</b>　·　</>}
             {meta.params?.start}~{meta.params?.end}　·　策略 <b>{strategyLabel(defaults?.strategies, meta.params?.strategy)}</b>
             　·　股票池 <b>{poolLabel(meta.params?.pool)}</b>
             　·　{strategyParamsSummary(meta.params)}
@@ -313,14 +301,7 @@ export default function Backtest() {
           </Panel>
 
           <div className="grid2">
-            <Panel title="持仓明细" sub={positions?.date ? `${positions.date}　共 ${positions.rows?.length || 0} 只` : ''}
-              actions={
-                <button className="ghost" disabled={!positions?.rows?.length}
-                  onClick={() => download(`${runId}_positions_${positions.date}.csv`, toCsv(positions.rows, ['ts_code', 'name', 'industry_name', 'weight']))}>
-                  导出CSV
-                </button>
-              }
-            >
+            <Panel title="持仓明细" sub={positions?.date ? `${positions.date}　共 ${positions.rows?.length || 0} 只` : ''}>
               <Table
                 columns={[
                   { key: 'ts_code', title: '代码' },
@@ -336,7 +317,6 @@ export default function Backtest() {
               title="交易流水" sub={trades ? `共 ${trades.total} 笔` : ''}
               actions={
                 <>
-                  <button className="ghost" disabled={!trades?.total} onClick={exportTrades} title="导出全部成交流水">导出CSV</button>
                   <button className="ghost" disabled={tradePage <= 1} onClick={() => setTradePage((p) => p - 1)}>上一页</button>
                   <span className="muted">{tradePage}</span>
                   <button className="ghost"
@@ -383,7 +363,7 @@ function RunForm({ defaults, onSubmit, onCancel }) {
   const initIdx = typeof p0.pool === 'string' ? (ALIAS_TO_CODE[p0.pool] || (p0.pool === 'all' ? 'all' : '000905.SH')) : '000905.SH'
   const strategies = defaults.strategies || []
 
-  const [f, setF] = useState({ start: p0.start, end: p0.end, freq: p0.freq || 'W', cash: p0.cash ?? 1e7 })
+  const [f, setF] = useState({ name: '', start: p0.start, end: p0.end, freq: p0.freq || 'W', cash: p0.cash ?? 1e7 })
   const [strategyId, setStrategyId] = useState(p0.strategy || strategies[0]?.id || '')
   const [sp, setSp] = useState(p0.strategy_params || schemaDefaults(strategies[0]?.param_schema))
   const [pool, setPool] = useState({ spec: null, err: null })
@@ -409,7 +389,7 @@ function RunForm({ defaults, onSubmit, onCancel }) {
 
   function submit() {
     onSubmit({
-      start: f.start, end: f.end, freq: f.freq, cash: Number(f.cash), pool: pool.spec,
+      name: f.name, start: f.start, end: f.end, freq: f.freq, cash: Number(f.cash), pool: pool.spec,
       strategy: strategyId, strategy_params: sp,
     })
   }
@@ -417,6 +397,7 @@ function RunForm({ defaults, onSubmit, onCancel }) {
   return (
     <Panel title="新建回测">
       <div className="row" style={{ marginBottom: 12 }}>
+        <label className="field">名称（可选）<input value={f.name} onChange={set('name')} placeholder="不填则用自动生成的编号" style={{ width: 160 }} /></label>
         <label className="field">起始日<input value={f.start} onChange={set('start')} size={10} /></label>
         <label className="field">结束日<input value={f.end} onChange={set('end')} size={10} /></label>
         <label className="field">频率

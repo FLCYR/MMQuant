@@ -56,8 +56,3 @@ def get(job_id: str) -> dict | None:
     with _lock:
         j = _jobs.get(job_id)
         return dict(j) if j else None
-
-
-def list_jobs() -> list[dict]:
-    with _lock:
-        return sorted(_jobs.values(), key=lambda j: j["created_at"], reverse=True)

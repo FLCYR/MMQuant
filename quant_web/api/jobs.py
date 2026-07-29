@@ -8,11 +8,6 @@ from quant_web import jobs as jobmod
 bp = Blueprint("jobs", __name__)
 
 
-@bp.get("/jobs")
-def list_jobs():
-    return jsonify(jobmod.list_jobs())
-
-
 @bp.get("/jobs/<job_id>")
 def get_job(job_id: str):
     j = jobmod.get(job_id)
