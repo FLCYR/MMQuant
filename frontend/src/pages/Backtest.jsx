@@ -3,6 +3,7 @@ import { api, pollJob } from '../api'
 import Chart, { dateAxis, money, num, pct, valueAxis } from '../components/Chart'
 import { Card, ErrorBox, Loading, Panel, Table } from '../components/ui'
 import PoolPicker, { poolLabel, registerIndustries, ALIAS_TO_CODE } from '../components/PoolPicker'
+import SchemaField, { schemaDefaults } from '../components/SchemaField'
 
 const RED = '#d64545'
 const BLUE = '#2f6fed'
@@ -375,47 +376,6 @@ function YearlyChart({ perf }) {
       ],
     }} />
   )
-}
-
-// 按 param_schema 的 type 渲染单个字段（int/float/bool/select）；'factors' 类型不走这里，
-// 单独在下方渲染因子勾选网格（需要 defaults.factors 的风格信息）。
-function SchemaField({ field, value, onChange }) {
-  if (field.type === 'int' || field.type === 'float') {
-    return (
-      <label className="field">
-        {field.label}
-        <input type="number" step={field.type === 'float' ? '0.01' : '1'}
-          value={value ?? ''} placeholder={field.default == null ? '无' : String(field.default)}
-          onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
-          style={{ width: 90 }} />
-      </label>
-    )
-  }
-  if (field.type === 'bool') {
-    return (
-      <label className="field" style={{ justifyContent: 'flex-end' }}>
-        <span style={{ visibility: 'hidden' }}>.</span>
-        <span><input type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} /> {field.label}</span>
-      </label>
-    )
-  }
-  if (field.type === 'select') {
-    return (
-      <label className="field">
-        {field.label}
-        <select value={value ?? field.default} onChange={(e) => onChange(e.target.value)}>
-          {field.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-      </label>
-    )
-  }
-  return null
-}
-
-function schemaDefaults(schema) {
-  const out = {}
-  ;(schema || []).forEach((f) => { out[f.key] = f.default })
-  return out
 }
 
 function RunForm({ defaults, onSubmit, onCancel }) {

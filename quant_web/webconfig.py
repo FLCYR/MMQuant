@@ -5,6 +5,8 @@ import config
 
 # 回测结果落盘目录（新增，不影响既有 data/ 结构）
 RUNS_DIR = config.DATA_DIR / "backtest"
+# 策略实盘跟踪（纸上模拟）状态落盘目录
+LIVE_DIR = config.DATA_DIR / "live"
 
 HOST = "127.0.0.1"
 PORT = 5000

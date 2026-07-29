@@ -2,10 +2,12 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import Backtest from './pages/Backtest'
 import Factors from './pages/Factors'
 import DataOverview from './pages/DataOverview'
+import LiveTracking from './pages/LiveTracking'
 
 const NAV = [
   { to: '/backtest', label: '回测分析' },
   { to: '/factors', label: '因子分析' },
+  { to: '/live', label: '策略跟踪' },
   { to: '/data', label: '数据概览' },
 ]
 
@@ -25,6 +27,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/backtest" replace />} />
           <Route path="/backtest" element={<Backtest />} />
           <Route path="/factors" element={<Factors />} />
+          <Route path="/live" element={<LiveTracking />} />
           <Route path="/data" element={<DataOverview />} />
         </Routes>
       </main>

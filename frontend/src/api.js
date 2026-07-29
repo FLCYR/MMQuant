@@ -58,6 +58,14 @@ export const api = {
   pipelineBackfill: (p) => post('/api/pipeline/backfill', p),
   pipelineChecks: (p) => post('/api/pipeline/checks', p),
   pipelineBuildFactors: (p) => post('/api/pipeline/build_factors', p),
+
+  // 策略实盘跟踪（纸上模拟，均异步）
+  liveList: () => j('/api/live/strategies'),
+  liveCreate: (p) => post('/api/live/strategies', p),
+  liveDetail: (id) => j(`/api/live/strategies/${id}`),
+  liveStop: (id) => post(`/api/live/strategies/${id}/stop`),
+  liveDelete: (id) => j(`/api/live/strategies/${id}`, { method: 'DELETE' }),
+  liveAdvance: (id) => post(`/api/live/strategies/${id}/advance`),
 }
 
 // 轮询任务直到结束
