@@ -24,7 +24,7 @@ def main():
     print(f"API 服务：http://{args.host}:{args.port}/api/health")
     if args.prod:
         from waitress import serve
-        serve(app, host=args.host, port=args.port, threads=8)
+        serve(app, host=args.host, port=args.port, threads=webconfig.WAITRESS_THREADS)
     else:
         app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
