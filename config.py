@@ -99,6 +99,15 @@ FACTOR_QUANTILES = 5                 # 分组评估的分位数
 WINSOR_MAD = 5.0                     # MAD 去极值倍数
 TRADING_DAYS_PER_YEAR = 252          # 年化用
 
+# ---------------------------------------------------------------- 运行时资源
+# DuckDB 默认按"系统总内存"的 80% 给每个连接分配预算，而本项目每次查询都新开一个
+# connection（见 quant_data/storage.query）；并发请求一多，各连接都以为自己能用
+# 大半个系统内存，在内存较小或与其他服务共享的机器（如云服务器）上极易叠加触发
+# OOM killer。显式设一个保守上限，必要时用环境变量按部署环境调整（本地开发机内存
+# 充裕，一般不用改）。
+DUCKDB_MEMORY_LIMIT = os.environ.get("DUCKDB_MEMORY_LIMIT", "512MB")
+DUCKDB_THREADS = int(os.environ.get("DUCKDB_THREADS", "2"))
+
 # ---------------------------------------------------------------- 策略/回测层
 # 默认因子池：取因子评估中"强/可用"者（LNCAP/ILLIQ 在中证500 内失效，故不入池）
 STRATEGY_FACTORS = ["VOL20", "TURN20", "REV20", "EP", "BP", "ROE", "SP"]

@@ -156,6 +156,9 @@ def query(sql: str, params: list | None = None) -> pd.DataFrame:
     占位符），不得用 f-string 直接拼接——历史上 kline/MarketData 曾因此可注入。"""
     con = duckdb.connect()
     try:
+        # 显式限内存/线程，避免默认"按系统总内存的80%"在并发/共享主机上叠加触发 OOM
+        con.execute(f"PRAGMA memory_limit='{config.DUCKDB_MEMORY_LIMIT}'")
+        con.execute(f"PRAGMA threads={config.DUCKDB_THREADS}")
         return (con.execute(sql, params) if params is not None else con.execute(sql)).df()
     finally:
         con.close()
