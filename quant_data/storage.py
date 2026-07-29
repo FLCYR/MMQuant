@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import duckdb
@@ -151,14 +152,32 @@ def write_raw(api_name: str, biz_date: str, df: pd.DataFrame) -> None:
 
 
 # ----------------------------------------------------------------- DuckDB 查询
+# 进程内共享一个 connection（而不是每次查询各开一个全新的 DuckDB 引擎实例）：
+# 一是避免重复付出连接/元数据初始化的开销，二是让 memory_limit 是"整个进程共用
+# 一份预算"而不是"每个连接各自以为能用这么多"——并发请求一多，后者会在内存较小
+# 的机器上（如云服务器）叠加突破实际可用内存，触发 OOM killer。每次查询用
+# con.cursor() 取一个线程安全的游标，共享同一份配置与缓冲池。
+_con: duckdb.DuckDBPyConnection | None = None
+_con_lock = threading.Lock()
+
+
+def _get_con() -> duckdb.DuckDBPyConnection:
+    global _con
+    if _con is None:
+        with _con_lock:
+            if _con is None:
+                c = duckdb.connect()
+                c.execute(f"PRAGMA memory_limit='{config.DUCKDB_MEMORY_LIMIT}'")
+                c.execute(f"PRAGMA threads={config.DUCKDB_THREADS}")
+                _con = c
+    return _con
+
+
 def query(sql: str, params: list | None = None) -> pd.DataFrame:
     """执行 SQL。凡拼入 SQL 的值来自外部输入（HTTP 参数等），一律走 params（`?`
     占位符），不得用 f-string 直接拼接——历史上 kline/MarketData 曾因此可注入。"""
-    con = duckdb.connect()
+    con = _get_con().cursor()
     try:
-        # 显式限内存/线程，避免默认"按系统总内存的80%"在并发/共享主机上叠加触发 OOM
-        con.execute(f"PRAGMA memory_limit='{config.DUCKDB_MEMORY_LIMIT}'")
-        con.execute(f"PRAGMA threads={config.DUCKDB_THREADS}")
         return (con.execute(sql, params) if params is not None else con.execute(sql)).df()
     finally:
         con.close()
