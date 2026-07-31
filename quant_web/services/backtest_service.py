@@ -62,15 +62,16 @@ def run_and_save(job_id: str, params: dict) -> dict:
     p["strategy_params"] = strategy_params          # 落盘的是合并默认值后的完整参数
     p["name"] = (p.get("name") or "").strip()
 
+    # 策略可声明固定频率（事件驱动策略如 MARS 需日频，覆盖表单所选频率）
+    spec = strat_base.REGISTRY[strategy_id]
+    freq = spec.cadence or p["freq"]
+    if spec.cadence:
+        p["freq"] = spec.cadence                     # 落盘记录实际生效的频率
+
     jobs.progress(job_id, "准备调仓日", 5)
-    dates = get_rebalance_dates(p["start"], p["end"], p["freq"])
+    dates = get_rebalance_dates(p["start"], p["end"], freq)
     if len(dates) < 3:
         raise ValueError("调仓日过少，请扩大区间")
-
-    jobs.progress(job_id, "准备行情数据", 30)
-    uf = universe.universe_frame(dates, pool=p["pool"])
-    codes = sorted(uf["ts_code"].unique())
-    mkt = MarketData.from_storage(dates[0], p["end"], codes)
 
     jobs.progress(job_id, "构建策略", 40)
     _panel_cache: dict[str, pd.DataFrame] = {}
@@ -86,10 +87,28 @@ def run_and_save(job_id: str, params: dict) -> dict:
     )
     strat = strat_base.build(strategy_id, strategy_params, ctx)
 
+    # 行情只需覆盖策略真正会成交的标的：事件驱动策略（MARS）自报 traded_codes（很小的子集），
+    # 其余策略用整个股票池；由此避免为大扫描域构建巨大的行情宽表
+    jobs.progress(job_id, "准备行情数据", 48)
+    tc = getattr(strat, "traded_codes", None)
+    if callable(tc):                                 # 事件驱动策略自报成交标的
+        codes = tc()
+        if not codes:
+            raise ValueError("策略在该区间/股票池未命中任何交易信号，请放宽参数或扩大股票池")
+    else:
+        uf = universe.universe_frame(dates, pool=p["pool"])
+        codes = sorted(uf["ts_code"].unique())
+    mkt = MarketData.from_storage(dates[0], p["end"], codes)
+
+    def _run(costs: CostModel):
+        if spec.driver:                              # 策略自带回测驱动（事件驱动/买入持有）
+            return spec.driver(strat, mkt, dates, costs, cash)
+        return engine.run(strat.target_weights, mkt, dates, costs, cash)
+
     jobs.progress(job_id, "回测（含成本）", 55)
-    res = engine.run(strat.target_weights, mkt, dates, CostModel(), cash)
+    res = _run(CostModel())
     jobs.progress(job_id, "回测（零成本对照）", 75)
-    res0 = engine.run(strat.target_weights, mkt, dates, CostModel(zero=True), cash)
+    res0 = _run(CostModel(zero=True))
 
     jobs.progress(job_id, "汇总绩效", 88)
     idx = list(res.nav.index)

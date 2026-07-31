@@ -48,15 +48,26 @@ class StrategySpec:
     description: str
     param_schema: list[dict]                       # 前端表单渲染用，见各策略模块注释
     build: Callable[[dict, StrategyContext], "Strategy"]
+    # 以下两项为可选扩展，默认 None 时行为与原来完全一致（多因子等周期再平衡策略不受影响）：
+    cadence: str | None = None                     # 固定调仓频率（如事件驱动策略需 'D' 日频），
+                                                   #   非 None 时覆盖用户在表单里选的频率
+    driver: Callable | None = None                 # 自带回测驱动 (strat, market, dates, costs,
+                                                   #   cash) -> BacktestResult；事件驱动/买入持有类
+                                                   #   策略不适用"目标权重再平衡"引擎，用此自定义执行
 
 
 REGISTRY: dict[str, StrategySpec] = {}
 
 
-def register_strategy(id: str, label: str, description: str, param_schema: list[dict]):
-    """装饰构建函数 build(params, ctx) -> Strategy，注册为一个可选策略。"""
+def register_strategy(id: str, label: str, description: str, param_schema: list[dict],
+                      cadence: str | None = None, driver: Callable | None = None):
+    """装饰构建函数 build(params, ctx) -> Strategy，注册为一个可选策略。
+
+    cadence / driver 为可选：周期再平衡策略（多因子等）不传，行为不变；事件驱动策略
+    （如 MARS 打板）传 cadence='D' + 自带 driver，避免污染共享引擎与既有策略。"""
     def deco(build_fn):
-        REGISTRY[id] = StrategySpec(id, label, description, param_schema, build_fn)
+        REGISTRY[id] = StrategySpec(id, label, description, param_schema, build_fn,
+                                    cadence=cadence, driver=driver)
         return build_fn
     return deco
 

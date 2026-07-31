@@ -247,6 +247,15 @@ def _build(params: dict, ctx: StrategyContext) -> Strategy:
 | 策略 id | 中文名 | 说明 |
 |---|---|---|
 | `multifactor` | 多因子选股 | 多因子合成打分（等权 z-score / 滚动 IC 加权），域内取 top-N 等权，可选行业中性 |
+| `mars` | MARS 打板回踩 | 大盘放量 + 个股封涨停(反包/突破/主升之一) + 回踩两日不破中位且缩量 → T+3 开盘建仓，破中位或峰值回撤止盈清仓。**事件驱动买入持有**，见下 |
+
+**MARS**（`quant_strategy/strategies/mars.py`）与多因子是**两类不同的策略**：多因子是周期截面
+再平衡，MARS 是事件驱动 + 买入持有到止损。它不套用"目标权重再平衡"引擎（那样会被逐日拉回
+等权、凭空空转），而是通过注册表的两个可选扩展接入——`cadence='D'`（声明日频）+ 自带
+`driver`（复用 Portfolio/CostModel/execution/MarketData/metrics 的小型事件驱动回测循环）。
+引擎与其它策略零改动，前端因 schema 驱动自动出现该策略。信号/出场逻辑与口径详见模块文件头。
+注意：MARS 为**回测**设计；实盘跟踪页用的是权重再平衡模型，暂不适配 MARS（会逐日再平衡）。
+建议扫描域选 `board:主板`（打板标的集中在主板），涨停判定用 `limit_up` 字段自动兼容各板块涨幅。
 
 **多因子选股**的可插拔部件（换任一部件，引擎代码零改动）：
 - `Combiner`：`EqualWeightCombiner`（等权 z-score，默认）/ `RollingICCombiner`（滚动 IC 加权，
