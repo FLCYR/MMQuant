@@ -39,9 +39,19 @@ SH_INDEX = "000001.SH"     # 上证综指，其 amount 即沪市全天成交额
 
 
 # ------------------------------------------------------------------ 数据读取
-def _scan_codes(pool, ref_date: str) -> list[str]:
-    """扫描universe：用某一参考日解析一次 pool（板块池与日期无关，指数池取该日成分）。"""
-    uf = universe.universe_frame([ref_date], pool=pool)
+def _scan_codes(pool, window_dates: list[str]) -> list[str]:
+    """扫描universe：在回测窗口内**采样多个日期取并集**解析 pool。
+
+    只用单个日期太脆弱——某天数据不全（如当天行情还没出全）universe_frame 就返回空，
+    导致"扫描域为空"。采样多日取并集既容错单日空缺，又能覆盖多年回测里指数成分的
+    进出（板块池与日期无关，采样对它无副作用）。"""
+    if not window_dates:
+        return []
+    step = max(1, len(window_dates) // 40)            # 全窗口采样约 40 个点，足够稳健且不慢
+    sample = window_dates[::step]
+    if window_dates[-1] not in sample:
+        sample.append(window_dates[-1])
+    uf = universe.universe_frame(sample, pool=pool)
     return sorted(uf["ts_code"].unique()) if not uf.empty else []
 
 
@@ -204,7 +214,9 @@ def mars_driver(strat: MarsStrategy, market: MarketData, dates: list[str],
     held_exit: dict[str, str | None] = {}             # code -> 计划清仓执行日
     nav_rows, trades_all, turn_rows, exec_w = [], [], [], {}
 
-    for d in dates:
+    # 迭代行情实际覆盖的交易日（与主引擎一致）：传入的 dates 可能含超出数据范围的
+    # 未来日历日（如 end 默认取"今天"但数据只到上一个交易日），直接用会越界报错
+    for d in market.dates:
         # 1) 退市/长期无行情强平（复用引擎口径）
         for code in list(pf.units):
             if market.delisted_by(d, code):
@@ -279,7 +291,7 @@ def _build(params: dict, ctx: StrategyContext) -> MarsStrategy:
         raise ValueError("回测区间过短")
     start, end = dates[0], dates[-1]
     ctx.progress("MARS：解析扫描域", 42)
-    codes = _scan_codes(ctx.pool, end)
+    codes = _scan_codes(ctx.pool, dates)
     if not codes:
         raise ValueError("扫描域为空，请检查股票池")
 
@@ -293,16 +305,21 @@ def _build(params: dict, ctx: StrategyContext) -> MarsStrategy:
     surge = float(p["surge_threshold"])
     surge_ok = set(sh.index[(sh.diff() > surge).fillna(False)])
 
-    ctx.progress("MARS：读扫描域行情", 50)
-    bars = _load_bars(codes, warm_start, end)
-    if bars.empty:
-        raise ValueError("扫描域无行情数据")
-
-    ctx.progress("MARS：扫描信号", 58)
+    # 按股票分批读行情再扫描：大扫描域×多年若一次性读入会撑爆内存（小内存云服务器直接
+    # OOM→502）。分批后峰值内存只与单批（数百只）相关，与总规模无关。
+    ctx.progress("MARS：扫描信号", 50)
     strat = MarsStrategy(max_positions=int(p["max_positions"]))
-    for _, g in bars.groupby("ts_code", sort=False):
-        for sig in _scan_one(g, surge_ok, all_dates, pos, p):
-            strat.add(sig)
+    batch = 400
+    for i in range(0, len(codes), batch):
+        chunk = codes[i:i + batch]
+        bars = _load_bars(chunk, warm_start, end)
+        if not bars.empty:
+            for _, g in bars.groupby("ts_code", sort=False):
+                for sig in _scan_one(g, surge_ok, all_dates, pos, p):
+                    strat.add(sig)
+        ctx.progress("MARS：扫描信号", 50 + int(12 * (i + batch) / max(1, len(codes))))
+    if not strat.traded_codes():
+        raise ValueError("扫描域在该区间未命中任何信号，请放宽参数或调整区间/股票池")
     ctx.progress(f"MARS：命中 {len(strat.traded_codes())} 只标的", 62)
     return strat
 
