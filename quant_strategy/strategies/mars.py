@@ -306,10 +306,12 @@ def _build(params: dict, ctx: StrategyContext) -> MarsStrategy:
     surge_ok = set(sh.index[(sh.diff() > surge).fillna(False)])
 
     # 按股票分批读行情再扫描：大扫描域×多年若一次性读入会撑爆内存（小内存云服务器直接
-    # OOM→502）。分批后峰值内存只与单批（数百只）相关，与总规模无关。
+    # OOM→502）。分批大小按**目标行数**自适应——窗口越长、每批股票越少，使单批行数（进而
+    # 峰值内存）与回测区间长度无关，只与单批规模相关。
     ctx.progress("MARS：扫描信号", 50)
     strat = MarsStrategy(max_positions=int(p["max_positions"]))
-    batch = 400
+    n_days = max(1, len(all_dates))
+    batch = min(400, max(20, 700_000 // n_days))      # 目标每批约 70 万行
     for i in range(0, len(codes), batch):
         chunk = codes[i:i + batch]
         bars = _load_bars(chunk, warm_start, end)
