@@ -45,6 +45,23 @@ def read_panel(name: str) -> pd.DataFrame:
     return pd.read_parquet(p) if p.exists() else pd.DataFrame()
 
 
+def panel_date_stats(name: str) -> dict:
+    """只取面板的调仓日统计（个数/最早/最晚），用 DuckDB 只扫 trade_date 一列，
+    不把整张面板（数百 MB）读进内存——供数据概览等只需要日期摘要的地方使用，
+    避免为了数几个日期就 OOM。"""
+    p = _panel_path(name)
+    if not p.exists():
+        return {"dates": 0, "start": None, "end": None}
+    src = str(p).replace("\\", "/")
+    r = storage.query(
+        "SELECT count(DISTINCT trade_date) n, min(trade_date) mn, max(trade_date) mx "
+        "FROM read_parquet(?)", [src]
+    ).iloc[0]
+    return {"dates": int(r["n"]),
+            "start": str(r["mn"]) if r["mn"] is not None else None,
+            "end": str(r["mx"]) if r["mx"] is not None else None}
+
+
 def check_dates_coverage(dates: list[str], panel: pd.DataFrame, min_ratio: float = 0.9) -> None:
     """校验请求的调仓日在因子面板里确有数据，否则直接报错而不是静默跑出错误结果。
 

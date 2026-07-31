@@ -45,14 +45,15 @@ def info() -> dict:
     if src:
         r = storage.query(f"SELECT max(trade_date) mx FROM {src}").iloc[0]
         last_quote = str(r["mx"]) if r["mx"] is not None else None
-    panel = compute.read_panel("processed")
+    # 只取面板的日期摘要（DuckDB 只扫 trade_date 一列），不整表读入——面板有数百 MB，
+    # 为了数几个调仓日就把它读进内存会直接把小内存机器撑爆（历史 OOM 根因之一）
+    stats = compute.panel_date_stats("processed")
     return {
         "phases": [{"id": p, "label": PHASE_LABELS[p]} for p in ALL_PHASES],
         "universe_indices": config.UNIVERSE_INDICES,
         "last_quote_date": last_quote,
-        "factor_panel_dates": int(panel["trade_date"].nunique()) if not panel.empty else 0,
-        "factor_panel_span": ([str(panel["trade_date"].min()), str(panel["trade_date"].max())]
-                              if not panel.empty else None),
+        "factor_panel_dates": stats["dates"],
+        "factor_panel_span": ([stats["start"], stats["end"]] if stats["dates"] else None),
     }
 
 
