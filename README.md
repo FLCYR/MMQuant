@@ -363,6 +363,15 @@ D:\Anaconda\envs\QUANT\pythonw.exe scripts/scheduler.py           # 后台常驻
   127.0.0.1:5000）+ `mmquant-scheduler`（`scheduler.py`，见上）
 - nginx：独立 `conf.d/mmquant.conf`，监听 8080，`/` 挂前端静态文件，`/api/` 反代到
   127.0.0.1:5000
+- **小内存机器内存兜底**（本机 1.8G 且与其它服务共享）：
+  - systemd 给两个 service 设了 `MemoryMax=650M`（cgroup 硬顶）+ `MALLOC_ARENA_MAX=2`，
+    单个 service 内存失控只会干净重启、不波及同机其它服务
+  - `/etc/mmquant.env` 里设 `DUCKDB_MEMORY_LIMIT=300MB`：DuckDB 默认按系统内存的 80%
+    给每查询预算，300MB + Python 基线 ~190MB 才稳稳落在 650M cgroup 内（否则大扫描/
+    大回测的单个 DuckDB 查询就会触顶 OOM）。本地开发机内存充裕，用代码默认 512MB 即可，
+    不必设此变量
+  - MARS 全历史×全主板这类"大扫描域×长区间"回测已按目标行数自适应分批，峰值内存与区间
+    长度解耦；实测全历史峰值 ~560MB、连续多次不累积，稳定跑在 650M 内
 
 **以后同步改动**：改完代码在本地跑 `bash scripts/deploy.sh` 即可——推代码到
 GitHub、本地打包前端、同步到服务器、服务器拉最新代码、重启两个 service，全自动。
